@@ -1,0 +1,110 @@
+name: Release APK Build
+
+# Signed release build of the private lovely app.
+# This repo holds only the workflow; the code is cloned from the private
+# repository via PRIVATE_REPO_PAT. Keystore and passwords come only from
+# secrets and never appear in code or logs.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  APP_DIR: app-src
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: ${{ env.APP_DIR }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('app-src/**/*.gradle*', 'app-src/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" \
+            "platforms;android-31" \
+            "build-tools;30.0.3" \
+            "cmake;3.18.1"
+
+      - name: Set up NDK r25c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          link-to-sdk: true
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          test -s "$RUNNER_TEMP/release.keystore"
+
+      - name: Validate keystore
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          file "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" | head -n 8
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+        working-directory: ${{ env.APP_DIR }}
+
+      - name: Build signed release APKs
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease --stacktrace --build-cache \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias=mykey \
+            -Pandroid.injected.signing.key.password="$KEYSTORE_PASSWORD"
+
+      - name: List outputs
+        if: always()
+        run: find app-src -name "*-release.apk" -path "*outputs/apk/*" | wc -l
+
+      - name: Upload outputs
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          i=0
+          n=$(find app-src -name "*-release.apk" -path "*outputs/apk/*" | wc -l)
+          for apk in $(find app-src -name "*-release.apk" -path "*outputs/apk/*"); do
+            i=$((i + 1))
+            echo "Uploading file $i of $n..."
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+              -F "chat_id=${TG_CHAT_ID}" \
+              -F "document=@${apk}" \
+              -F "caption=build ${{ github.run_number }} ($i/$n)" \
+              --fail --show-error -o /dev/null
+          done
