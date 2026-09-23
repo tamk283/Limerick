@@ -1,9 +1,9 @@
 name: Release APK Build
 
-# Signed release build of the private lovely app.
-# This repo holds only the workflow; the code is cloned from the private
-# repository via PRIVATE_REPO_PAT. Keystore and passwords come only from
-# secrets and never appear in code or logs.
+# Signed Android release build.
+# This repo holds only the workflow; sources are cloned from a private
+# repository via token. Keystore and passwords come only from secrets
+# and never appear in code or logs.
 on:
   push:
     branches: [ main ]
