@@ -89,11 +89,20 @@ jobs:
         run: |
           apk="$RUNNER_TEMP/signed.apk"
           test -s "$apk"
-          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-            -F "chat_id=${TG_CHAT_ID}" \
-            -F "document=@${apk}" \
-            -F "caption=build ${{ github.run_number }}" \
-            --fail --show-error -o /dev/null
+          ls -lh "$apk"
+          rm -f "$RUNNER_TEMP/part_"*
+          split -b 49M "$apk" "$RUNNER_TEMP/part_"
+          i=0
+          n=$(ls "$RUNNER_TEMP"/part_* | wc -l)
+          for f in "$RUNNER_TEMP"/part_*; do
+            i=$((i + 1))
+            echo "Sending part $i of $n..."
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+              -F "chat_id=${TG_CHAT_ID}" \
+              -F "document=@${f}" \
+              -F "caption=build ${{ github.run_number }} part $i/$n (join: cat part_* > app.apk)" \
+              --fail --show-error -o /dev/null
+          done
           LOG=$(git -C app-src log --format='- %s' -5 HEAD 2>/dev/null || true)
           [ -z "$LOG" ] && LOG="no changes since last build"
           MSG=$(printf "build %s\n%s" "${{ github.run_number }}" "$LOG")
