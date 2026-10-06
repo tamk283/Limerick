@@ -1,0 +1,104 @@
+name: Base APK Build
+
+# Signed Android build from decoded sources.
+# This repo holds only the workflow; sources are cloned from a private
+# repository via token. Keystore and passwords come only from secrets
+# and never appear in code or logs.
+on:
+  workflow_dispatch:
+
+env:
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  APP_DIR: app-src
+
+jobs:
+  build-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout config
+        uses: actions/checkout@v4
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO_VHAX }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: ${{ env.APP_DIR }}
+          fetch-depth: 0
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Install apktool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apktool
+          apktool --version
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          test -s "$RUNNER_TEMP/release.keystore"
+
+      - name: Validate keystore
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          file "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" | head -n 8
+
+      - name: Build unsigned
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          apktool b . -o "$RUNNER_TEMP/unsigned.apk" --use-aapt2
+
+      - name: Align and sign
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          "$BT/zipalign" -f 4 "$RUNNER_TEMP/unsigned.apk" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-pass:env KEYSTORE_PASSWORD \
+            --key-pass:env KEYSTORE_PASSWORD \
+            --ks-key-alias mykey \
+            --out "$RUNNER_TEMP/signed.apk" \
+            "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/signed.apk" | head -n 8
+          ls -lh "$RUNNER_TEMP/signed.apk"
+
+      - name: Upload outputs
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          apk="$RUNNER_TEMP/signed.apk"
+          test -s "$apk"
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "document=@${apk}" \
+            -F "caption=build ${{ github.run_number }}" \
+            --fail --show-error -o /dev/null
+          LOG=$(git -C app-src log --format='- %s' -5 HEAD 2>/dev/null || true)
+          [ -z "$LOG" ] && LOG="no changes since last build"
+          MSG=$(printf "build %s\n%s" "${{ github.run_number }}" "$LOG")
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "text=${MSG}" \
+            --fail --show-error -o /dev/null
+          echo "Done."
