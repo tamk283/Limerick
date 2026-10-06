@@ -74,8 +74,8 @@ jobs:
           "$BT/zipalign" -f 4 "$RUNNER_TEMP/unsigned.apk" "$RUNNER_TEMP/aligned.apk"
           "$BT/apksigner" sign \
             --ks "$KEYSTORE_PATH" \
-            --ks-pass:env KEYSTORE_PASSWORD \
-            --key-pass:env KEYSTORE_PASSWORD \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEYSTORE_PASSWORD \
             --ks-key-alias mykey \
             --out "$RUNNER_TEMP/signed.apk" \
             "$RUNNER_TEMP/aligned.apk"
