@@ -17,6 +17,8 @@ jobs:
   build-release:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - name: Checkout config
         uses: actions/checkout@v4
@@ -60,7 +62,9 @@ jobs:
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          # 1. Compile Java sources if present
+          BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+
+          # 1. Compile Java sources if present and merge with classes.dex
           if [ -d "app-src/src/main/java" ]; then
             echo "Compiling Java sources..."
             mkdir -p build_classes
@@ -68,50 +72,66 @@ jobs:
               -cp "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" \
               -d build_classes \
               $(find app-src/src/main/java -name "*.java")
-            
+
             mkdir -p build_dex
-            "$ANDROID_SDK_ROOT/build-tools/34.0.0/d8" \
+            echo "Merging with existing classes.dex..."
+            "$BT/d8" \
               --output build_dex \
-              --min-api 26 \
+              --min-api 30 \
+              app-src/classes.dex \
               $(find build_classes -name "*.class")
-            
-            cp build_dex/classes.dex app-src/classes2.dex
-            echo "Added classes2.dex"
+
+            cp build_dex/classes*.dex app-src/
+            echo "DEX updated successfully."
           fi
 
-          # 2. Package unsigned APK
-          echo "Packaging APK..."
+          # 2. Package unsigned APK:
+          # Regular assets/resources are compressed
+          echo "Packaging resources and dex..."
           (cd app-src && zip -r "$RUNNER_TEMP/unsigned.apk" \
             AndroidManifest.xml \
             resources.arsc \
             classes*.dex \
             res \
             assets \
+            -x "*.bak" -x "*.git*" > /dev/null)
+
+          # Native libraries MUST be stored uncompressed (-0) for direct mmap loading
+          echo "Adding uncompressed native libraries..."
+          (cd app-src && zip -r -0 "$RUNNER_TEMP/unsigned.apk" \
             lib \
             -x "*.bak" -x "*.git*" > /dev/null)
 
-          # 3. Zipalign
-          BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          # 3. Zipalign (4-byte alignment, page-aligns shared libraries)
+          echo "Aligning APK..."
           "$BT/zipalign" -f -p 4 "$RUNNER_TEMP/unsigned.apk" "$RUNNER_TEMP/aligned.apk"
 
-          # 4. Sign
+          # 4. Sign with v1 (JAR), v2 (APK), and v3 schemes explicitly enabled
+          echo "Signing APK..."
           "$BT/apksigner" sign \
             --ks "$KEYSTORE_PATH" \
             --ks-pass env:KEYSTORE_PASSWORD \
             --key-pass env:KEYSTORE_PASSWORD \
             --ks-key-alias mykey \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
             --out "$RUNNER_TEMP/client-release.apk" \
             "$RUNNER_TEMP/aligned.apk"
 
-          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/client-release.apk" | head -n 8
+          echo "Verifying signature schemes:"
+          "$BT/apksigner" verify -v "$RUNNER_TEMP/client-release.apk" | head -n 15
           ls -lh "$RUNNER_TEMP/client-release.apk"
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: client-release-apk
-          path: ${{ runner.temp }}/client-release.apk
-          if-no-files-found: error
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="build-${{ github.run_number }}"
+          gh release create "$TAG_NAME" \
+            "$RUNNER_TEMP/client-release.apk#client-release.apk" \
+            --title "Build ${{ github.run_number }}" \
+            --notes "Direct APK download without zip"
 
       - name: Upload to Telegram
         if: always()
