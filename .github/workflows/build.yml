@@ -1,16 +1,14 @@
 name: Release APK Build
 
 # Signed Android release build.
-# This repo holds only the workflow; sources are cloned from a private
-# repository via token. Keystore and passwords come only from secrets
-# and never appear in code or logs.
+# Sources are cloned from a private repository via token.
+# Keystore and passwords come only from secrets and never appear in code or logs.
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
 env:
-  GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
   ANDROID_HOME: /usr/local/lib/android/sdk
   APP_DIR: app-src
@@ -23,19 +21,12 @@ jobs:
       - name: Checkout config
         uses: actions/checkout@v4
 
-      - name: Read last build
-        run: |
-          if [ -f .last-release-sha ]; then
-            echo "PREV_SHA=$(cat .last-release-sha | tr -d ' \t\r\n')" >> "$GITHUB_ENV"
-          fi
-
       - name: Checkout sources
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.PRIVATE_REPO }}
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: ${{ env.APP_DIR }}
-          submodules: recursive
           fetch-depth: 0
 
       - name: Set up Java 17 (Temurin)
@@ -44,30 +35,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('app-src/**/*.gradle*', 'app-src/**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
       - name: Install Android SDK packages
         run: |
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
           "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
             "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "cmake;3.22.1"
-
-      - name: Set up NDK r25c
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r25c
-          link-to-sdk: true
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
       - name: Decode keystore
         run: |
@@ -82,64 +56,75 @@ jobs:
           file "$KEYSTORE_PATH"
           keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" | head -n 8
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
-        working-directory: ${{ env.APP_DIR }}
-
-      - name: Build signed release APKs
-        working-directory: ${{ env.APP_DIR }}
+      - name: Build and sign APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          ./gradlew assembleRelease -q --stacktrace --build-cache \
-            -PversionCode=${{ github.run_number }} \
-            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias=mykey \
-            -Pandroid.injected.signing.key.password="$KEYSTORE_PASSWORD"
+          # 1. Compile Java sources if present
+          if [ -d "app-src/src/main/java" ]; then
+            echo "Compiling Java sources..."
+            mkdir -p build_classes
+            javac -source 17 -target 17 \
+              -cp "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" \
+              -d build_classes \
+              $(find app-src/src/main/java -name "*.java")
+            
+            mkdir -p build_dex
+            "$ANDROID_SDK_ROOT/build-tools/34.0.0/d8" \
+              --output build_dex \
+              --min-api 26 \
+              $(find build_classes -name "*.class")
+            
+            cp build_dex/classes.dex app-src/classes2.dex
+            echo "Added classes2.dex"
+          fi
 
-      - name: List outputs
+          # 2. Package unsigned APK
+          echo "Packaging APK..."
+          (cd app-src && zip -r "$RUNNER_TEMP/unsigned.apk" \
+            AndroidManifest.xml \
+            resources.arsc \
+            classes*.dex \
+            res \
+            assets \
+            lib \
+            -x "*.bak" -x "*.git*" > /dev/null)
+
+          # 3. Zipalign
+          BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          "$BT/zipalign" -f -p 4 "$RUNNER_TEMP/unsigned.apk" "$RUNNER_TEMP/aligned.apk"
+
+          # 4. Sign
+          "$BT/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEYSTORE_PASSWORD \
+            --ks-key-alias mykey \
+            --out "$RUNNER_TEMP/client-release.apk" \
+            "$RUNNER_TEMP/aligned.apk"
+
+          "$BT/apksigner" verify --print-certs "$RUNNER_TEMP/client-release.apk" | head -n 8
+          ls -lh "$RUNNER_TEMP/client-release.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-release-apk
+          path: ${{ runner.temp }}/client-release.apk
+          if-no-files-found: error
+
+      - name: Upload to Telegram
         if: always()
-        run: find app-src -name "*-release.apk" -path "*outputs/apk/*" | wc -l
-
-      - name: Upload outputs
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          i=0
-          n=$(find app-src -name "*-release.apk" -path "*outputs/apk/*" | wc -l)
-          for apk in $(find app-src -name "*-release.apk" -path "*outputs/apk/*"); do
-            i=$((i + 1))
-            echo "Uploading file $i of $n..."
+          apk="$RUNNER_TEMP/client-release.apk"
+          if [ -s "$apk" ] && [ -n "${TG_BOT_TOKEN:-}" ]; then
+            echo "Uploading APK to Telegram..."
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
               -F "chat_id=${TG_CHAT_ID}" \
               -F "document=@${apk}" \
-              -F "caption=build ${{ github.run_number }} ($i/$n)" \
-              --fail --show-error -o /dev/null
-          done
-          if [ -n "${PREV_SHA:-}" ]; then
-            LOG=$(git -C app-src log --format='- %s' "${PREV_SHA}..HEAD" 2>/dev/null | head -n 25)
-          else
-            LOG=""
+              -F "caption=client build ${{ github.run_number }}" \
+              --fail --show-error -o /dev/null || echo "Telegram send skipped"
           fi
-          if [ -z "$LOG" ]; then
-            LOG=$(git -C app-src log --format='- %s' -5 HEAD 2>/dev/null)
-          fi
-          [ -z "$LOG" ] && LOG="no changes since last build"
-          MSG=$(printf "build %s\n%s" "${{ github.run_number }}" "$LOG")
-          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -F "chat_id=${TG_CHAT_ID}" \
-            -F "text=${MSG}" \
-            --fail --show-error -o /dev/null
-          echo "Changelog sent."
-
-      - name: Record build
-        if: success()
-        run: |
-          git -C app-src rev-parse HEAD > .last-release-sha
-          git add .last-release-sha
-          git -c user.name="ci" -c user.email="ci@local" commit -m "update [skip ci]" || exit 0
-          git config --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin "https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/${{ github.repository }}.git"
-          git push origin HEAD:${{ github.ref_name }} || echo "record push skipped"
