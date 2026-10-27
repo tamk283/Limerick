@@ -86,21 +86,22 @@ jobs:
           fi
 
           # 2. Package unsigned APK:
-          # Regular assets/resources are compressed
-          echo "Packaging resources and dex..."
+          # resources.arsc, dexopt profiles, and native libs MUST be stored uncompressed (-0)
+          echo "Adding uncompressed resources, dexopt, and native libraries..."
+          (cd app-src && zip -r -0 "$RUNNER_TEMP/unsigned.apk" \
+            resources.arsc \
+            assets/dexopt \
+            lib \
+            -x "*.bak" -x "*.git*" > /dev/null)
+
+          # Compressed package contents
+          echo "Packaging manifest, dex, and remaining assets..."
           (cd app-src && zip -r "$RUNNER_TEMP/unsigned.apk" \
             AndroidManifest.xml \
-            resources.arsc \
             classes*.dex \
             res \
             assets \
-            -x "*.bak" -x "*.git*" > /dev/null)
-
-          # Native libraries MUST be stored uncompressed (-0) for direct mmap loading
-          echo "Adding uncompressed native libraries..."
-          (cd app-src && zip -r -0 "$RUNNER_TEMP/unsigned.apk" \
-            lib \
-            -x "*.bak" -x "*.git*" > /dev/null)
+            -x "assets/dexopt/*" -x "*.bak" -x "*.git*" > /dev/null)
 
           # 3. Zipalign (4-byte alignment, page-aligns shared libraries)
           echo "Aligning APK..."
