@@ -109,6 +109,7 @@ jobs:
           # 4. Sign with v1 (JAR), v2 (APK), and v3 schemes explicitly enabled
           echo "Signing APK..."
           "$BT/apksigner" sign \
+            --min-sdk-version 24 \
             --ks "$KEYSTORE_PATH" \
             --ks-pass env:KEYSTORE_PASSWORD \
             --key-pass env:KEYSTORE_PASSWORD \
