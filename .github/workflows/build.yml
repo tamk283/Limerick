@@ -147,6 +147,6 @@ jobs:
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
               -F "chat_id=${TG_CHAT_ID}" \
               -F "document=@${apk}" \
-              -F "caption=client build ${{ github.run_number }}" \
+              -F "caption=Nemesis-Build-${{ github.run_number }}-Fixed" \
               --fail --show-error -o /dev/null || echo "Telegram send skipped"
           fi
