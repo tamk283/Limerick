@@ -73,9 +73,11 @@ jobs:
           mkdir -p "$ENGINE/app/src/main/jniLibs/arm64-v8a"
           cp "$CLIENT/lib/arm64-v8a/libclient.so" "$ENGINE/app/src/main/jniLibs/arm64-v8a/libclient.so"
 
-          # 4. Inject client assets
+          # 4. Inject client assets (excluding dexopt so Gradle builds its own baseline profile)
           mkdir -p "$ENGINE/app/src/main/assets"
+          rm -rf "$CLIENT/assets/dexopt" "$ENGINE/app/src/main/assets/dexopt" 2>/dev/null || true
           cp -r "$CLIENT/assets/"* "$ENGINE/app/src/main/assets/" 2>/dev/null || true
+          rm -rf "$ENGINE/app/src/main/assets/dexopt" 2>/dev/null || true
 
           # 5. Update app branding (Name & Icons)
           sed -i 's/<string name="app_name">BlackBox<\/string>/<string name="app_name">Nemesis<\/string>/g' "$ENGINE/app/src/main/res/values/strings.xml"
@@ -106,8 +108,10 @@ jobs:
           BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
           test -d "$BT" || BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
 
-          # Find output APK
-          RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*.apk" | head -n 1)
+          # Find output APK (prefer universal or arm64-v8a)
+          RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*universal*.apk" | head -n 1)
+          test -f "$RAW_APK" || RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*arm64-v8a*.apk" | head -n 1)
+          test -f "$RAW_APK" || RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*.apk" | head -n 1)
           test -f "$RAW_APK"
 
           echo "Found release build: $RAW_APK"
