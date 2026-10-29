@@ -74,15 +74,14 @@ jobs:
               $(find app-src/src/main/java -name "*.java")
 
             mkdir -p build_dex
-            echo "Merging with existing classes.dex..."
+            echo "Compiling Java sources into classes3.dex with D8..."
             "$BT/d8" \
               --output build_dex \
-              --min-api 30 \
-              app-src/classes*.dex \
+              --min-api 24 \
               $(find build_classes -name "*.class")
 
-            cp build_dex/classes*.dex app-src/
-            echo "DEX updated successfully."
+            cp build_dex/classes.dex app-src/classes3.dex
+            echo "classes3.dex created successfully without touching base DEX layout."
           fi
 
           # 2. Package unsigned APK:
