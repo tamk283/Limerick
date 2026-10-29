@@ -93,6 +93,10 @@ jobs:
           MAIN_KT="$ENGINE/app/src/main/java/top/niunaijun/blackboxa/view/main/MainActivity.kt"
           sed -i 's/setContentView(viewBinding.root)/try { com.nemesis.client.NemesisLauncherUI.build(this) } catch (t: Throwable) { setContentView(viewBinding.root) }/g' "$MAIN_KT"
 
+          # 7. Inject native client module loader into virtual process lifecycle
+          BAT_JAVA="$ENGINE/Bcore/src/main/java/top/niunaijun/blackbox/app/BActivityThread.java"
+          sed -i 's/onAfterApplicationOnCreate(packageName, processName, application);/onAfterApplicationOnCreate(packageName, processName, application); if ("com.mojang.minecraftpe".equals(packageName)) { try { System.loadLibrary("client"); android.util.Log.i("Nemesis", "libclient.so loaded into " + packageName); } catch (Throwable ignored) {} }/g' "$BAT_JAVA"
+
           echo "Nemesis integration into engine completed successfully."
 
       - name: Build release APK with Gradle
