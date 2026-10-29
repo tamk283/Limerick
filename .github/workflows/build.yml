@@ -84,10 +84,31 @@ jobs:
             echo "classes3.dex created successfully without touching base DEX layout."
           fi
 
-          # 2. Package unsigned APK:
+          # 2. Extract pristine base archive to preserve all 1,326 case-sensitive resources
+          echo "Extracting pristine base archive..."
+          mkdir -p "$RUNNER_TEMP/base_extracted"
+          unzip -q base.zip -d "$RUNNER_TEMP/base_extracted"
+          rm -rf "$RUNNER_TEMP/base_extracted/META-INF"
+
+          # Inject modified classes2.dex, supplementary classes3.dex, and native library
+          echo "Injecting runtime components..."
+          cp app-src/classes2.dex "$RUNNER_TEMP/base_extracted/classes2.dex"
+          cp app-src/classes3.dex "$RUNNER_TEMP/base_extracted/classes3.dex"
+          mkdir -p "$RUNNER_TEMP/base_extracted/lib/arm64-v8a"
+          cp app-src/lib/arm64-v8a/libclient.so "$RUNNER_TEMP/base_extracted/lib/arm64-v8a/libclient.so"
+
+          # Inject Nemesis assets
+          echo "Injecting client assets..."
+          cp -r app-src/assets/* "$RUNNER_TEMP/base_extracted/assets/" 2>/dev/null || true
+
+          # Apply custom drawables and app icon over base resources without losing case-sensitive files
+          echo "Applying custom launcher icon and drawables..."
+          cp -r app-src/res/* "$RUNNER_TEMP/base_extracted/res/" 2>/dev/null || true
+
+          # Package unsigned APK:
           # resources.arsc, dexopt profiles, and native libs MUST be stored uncompressed (-0)
           echo "Adding uncompressed resources, dexopt, and native libraries..."
-          (cd app-src && zip -r -0 "$RUNNER_TEMP/unsigned.apk" \
+          (cd "$RUNNER_TEMP/base_extracted" && zip -r -0 "$RUNNER_TEMP/unsigned.apk" \
             resources.arsc \
             assets/dexopt \
             lib \
@@ -95,7 +116,7 @@ jobs:
 
           # Compressed package contents
           echo "Packaging manifest, dex, and remaining assets..."
-          (cd app-src && zip -r "$RUNNER_TEMP/unsigned.apk" \
+          (cd "$RUNNER_TEMP/base_extracted" && zip -r "$RUNNER_TEMP/unsigned.apk" \
             AndroidManifest.xml \
             classes*.dex \
             res \
