@@ -78,7 +78,7 @@ jobs:
             "$BT/d8" \
               --output build_dex \
               --min-api 30 \
-              app-src/classes.dex \
+              app-src/classes*.dex \
               $(find build_classes -name "*.class")
 
             cp build_dex/classes*.dex app-src/
