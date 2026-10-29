@@ -1,8 +1,5 @@
 name: Release APK Build
 
-# Signed Android release build.
-# Sources are cloned from a private repository via token.
-# Keystore and passwords come only from secrets and never appear in code or logs.
 on:
   push:
     branches: [ main ]
@@ -12,6 +9,7 @@ env:
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
   ANDROID_HOME: /usr/local/lib/android/sdk
   APP_DIR: app-src
+  ENGINE_DIR: engine-src
 
 jobs:
   build-release:
@@ -23,7 +21,7 @@ jobs:
       - name: Checkout config
         uses: actions/checkout@v4
 
-      - name: Checkout sources
+      - name: Checkout custom client sources
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.PRIVATE_REPO }}
@@ -31,19 +29,24 @@ jobs:
           path: ${{ env.APP_DIR }}
           fetch-depth: 0
 
-      - name: Set up Java 17 (Temurin)
+      - name: Clone official NewBlackbox engine
+        run: |
+          git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git ${{ env.ENGINE_DIR }}
+
+      - name: Set up Java 21 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK and NDK packages
         run: |
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
           "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
             "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;26.3.11579264"
 
       - name: Decode keystore
         run: |
@@ -51,86 +54,70 @@ jobs:
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
           test -s "$RUNNER_TEMP/release.keystore"
 
-      - name: Validate keystore
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      - name: Integrate Nemesis client components into engine
         run: |
-          file "$KEYSTORE_PATH"
-          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" | head -n 8
+          ENGINE="${{ env.ENGINE_DIR }}"
+          CLIENT="${{ env.APP_DIR }}"
 
-      - name: Build and sign APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-        run: |
-          BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          # 1. Update NDK version and disable release minification for maximum stability
+          sed -i 's/ndkVersion = "29.0.13846066"/ndkVersion = "26.3.11579264"/g' "$ENGINE/app/build.gradle"
+          sed -i 's/ndkVersion = "29.0.13846066"/ndkVersion = "26.3.11579264"/g' "$ENGINE/Bcore/build.gradle"
+          sed -i 's/minifyEnabled true/minifyEnabled false/g' "$ENGINE/app/build.gradle"
+          sed -i 's/minifyEnabled true/minifyEnabled false/g' "$ENGINE/Bcore/build.gradle"
 
-          # 1. Compile Java sources if present and merge with classes.dex
-          if [ -d "app-src/src/main/java" ]; then
-            echo "Compiling Java sources..."
-            mkdir -p build_classes
-            javac -source 17 -target 17 \
-              -cp "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" \
-              -d build_classes \
-              $(find app-src/src/main/java -name "*.java")
+          # 2. Inject Nemesis launcher UI source
+          mkdir -p "$ENGINE/app/src/main/java/com/nemesis/client"
+          cp "$CLIENT/src/main/java/com/nemesis/client/NemesisLauncherUI.java" "$ENGINE/app/src/main/java/com/nemesis/client/NemesisLauncherUI.java"
 
-            mkdir -p build_dex
-            echo "Compiling Java sources into classes3.dex with D8..."
-            "$BT/d8" \
-              --output build_dex \
-              --min-api 24 \
-              $(find build_classes -name "*.class")
+          # 3. Inject native helper library into jniLibs
+          mkdir -p "$ENGINE/app/src/main/jniLibs/arm64-v8a"
+          cp "$CLIENT/lib/arm64-v8a/libclient.so" "$ENGINE/app/src/main/jniLibs/arm64-v8a/libclient.so"
 
-            cp build_dex/classes.dex app-src/classes3.dex
-            echo "classes3.dex created successfully without touching base DEX layout."
+          # 4. Inject client assets
+          mkdir -p "$ENGINE/app/src/main/assets"
+          cp -r "$CLIENT/assets/"* "$ENGINE/app/src/main/assets/" 2>/dev/null || true
+
+          # 5. Update app branding (Name & Icons)
+          sed -i 's/<string name="app_name">BlackBox<\/string>/<string name="app_name">Nemesis<\/string>/g' "$ENGINE/app/src/main/res/values/strings.xml"
+
+          if [ -f "$CLIENT/assets/nemesis_icon.png" ]; then
+            for mip in "$ENGINE"/app/src/main/res/mipmap-*; do
+              cp -f "$CLIENT/assets/nemesis_icon.png" "$mip/ic_launcher.png" 2>/dev/null || true
+              cp -f "$CLIENT/assets/nemesis_icon.png" "$mip/ic_launcher_round.png" 2>/dev/null || true
+            done
           fi
 
-          # 2. Extract pristine base archive to preserve all 1,326 case-sensitive resources
-          echo "Extracting pristine base archive..."
-          mkdir -p "$RUNNER_TEMP/base_extracted"
-          unzip -q base.zip -d "$RUNNER_TEMP/base_extracted"
-          rm -rf "$RUNNER_TEMP/base_extracted/META-INF"
+          # 6. Hook entry: in MainActivity.kt, invoke NemesisLauncherUI
+          MAIN_KT="$ENGINE/app/src/main/java/top/niunaijun/blackboxa/view/main/MainActivity.kt"
+          sed -i 's/setContentView(viewBinding.root)/try { com.nemesis.client.NemesisLauncherUI.build(this) } catch (t: Throwable) { setContentView(viewBinding.root) }/g' "$MAIN_KT"
 
-          # Inject modified classes2.dex, supplementary classes3.dex, and native library
-          echo "Injecting runtime components..."
-          cp app-src/classes2.dex "$RUNNER_TEMP/base_extracted/classes2.dex"
-          cp app-src/classes3.dex "$RUNNER_TEMP/base_extracted/classes3.dex"
-          mkdir -p "$RUNNER_TEMP/base_extracted/lib/arm64-v8a"
-          cp app-src/lib/arm64-v8a/libclient.so "$RUNNER_TEMP/base_extracted/lib/arm64-v8a/libclient.so"
+          echo "Nemesis integration into engine completed successfully."
 
-          # Inject Nemesis assets
-          echo "Injecting client assets..."
-          cp -r app-src/assets/* "$RUNNER_TEMP/base_extracted/assets/" 2>/dev/null || true
+      - name: Build release APK with Gradle
+        run: |
+          cd "${{ env.ENGINE_DIR }}"
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
-          # Apply custom drawables and app icon over base resources without losing case-sensitive files
-          echo "Applying custom launcher icon and drawables..."
-          cp -r app-src/res/* "$RUNNER_TEMP/base_extracted/res/" 2>/dev/null || true
+      - name: Sign APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          test -d "$BT" || BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
 
-          # Package unsigned APK:
-          # resources.arsc, dexopt profiles, and native libs MUST be stored uncompressed (-0)
-          echo "Adding uncompressed resources, dexopt, and native libraries..."
-          (cd "$RUNNER_TEMP/base_extracted" && zip -r -0 "$RUNNER_TEMP/unsigned.apk" \
-            resources.arsc \
-            assets/dexopt \
-            lib \
-            -x "*.bak" -x "*.git*" > /dev/null)
+          # Find output APK
+          RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*.apk" | head -n 1)
+          test -f "$RAW_APK"
 
-          # Compressed package contents
-          echo "Packaging manifest, dex, and remaining assets..."
-          (cd "$RUNNER_TEMP/base_extracted" && zip -r "$RUNNER_TEMP/unsigned.apk" \
-            AndroidManifest.xml \
-            classes*.dex \
-            res \
-            assets \
-            -x "assets/dexopt/*" -x "*.bak" -x "*.git*" > /dev/null)
+          echo "Found release build: $RAW_APK"
 
-          # 3. Zipalign (4-byte alignment, page-aligns shared libraries)
-          echo "Aligning APK..."
-          "$BT/zipalign" -f -p 4 "$RUNNER_TEMP/unsigned.apk" "$RUNNER_TEMP/aligned.apk"
+          # Zipalign
+          "$BT/zipalign" -f -p 4 "$RAW_APK" "$RUNNER_TEMP/aligned.apk"
 
-          # 4. Sign with v1 (JAR), v2 (APK), and v3 schemes explicitly enabled
-          echo "Signing APK..."
+          # Sign with apksigner (v1, v2, v3)
           "$BT/apksigner" sign \
-            --min-sdk-version 24 \
+            --min-sdk-version 21 \
             --ks "$KEYSTORE_PATH" \
             --ks-pass env:KEYSTORE_PASSWORD \
             --key-pass env:KEYSTORE_PASSWORD \
@@ -141,7 +128,6 @@ jobs:
             --out "$RUNNER_TEMP/client-release.apk" \
             "$RUNNER_TEMP/aligned.apk"
 
-          echo "Verifying signature schemes:"
           "$BT/apksigner" verify -v "$RUNNER_TEMP/client-release.apk" | head -n 15
           ls -lh "$RUNNER_TEMP/client-release.apk"
 
@@ -149,24 +135,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="build-${{ github.run_number }}"
-          gh release create "$TAG_NAME" \
-            "$RUNNER_TEMP/client-release.apk#client-release.apk" \
-            --title "Build ${{ github.run_number }}" \
-            --notes "Direct APK download without zip"
+          BUILD_NUM="${{ github.run_number }}"
+          TAG_NAME="build-${BUILD_NUM}"
+          TITLE="Build ${BUILD_NUM}"
 
-      - name: Upload to Telegram
-        if: always()
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: |
-          apk="$RUNNER_TEMP/client-release.apk"
-          if [ -s "$apk" ] && [ -n "${TG_BOT_TOKEN:-}" ]; then
-            echo "Uploading APK to Telegram..."
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-              -F "chat_id=${TG_CHAT_ID}" \
-              -F "document=@${apk}" \
-              -F "caption=Nemesis-Build-${{ github.run_number }}-Fixed" \
-              --fail --show-error -o /dev/null || echo "Telegram send skipped"
-          fi
+          cp "$RUNNER_TEMP/client-release.apk" ./client-release.apk
+
+          gh release create "$TAG_NAME" \
+            ./client-release.apk \
+            --title "$TITLE" \
+            --notes "Clean Gradle compilation of NewBlackbox engine with Nemesis Liquid Glass client"
