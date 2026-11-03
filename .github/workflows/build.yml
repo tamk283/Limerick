@@ -34,7 +34,7 @@ jobs:
       - name: install ndk
         run: |
           yes | sdkmanager --licenses || true
-          sdkmanager --install "build-tools;35.0.0" "ndk;26.3.11579264"
+          sdkmanager --install "build-tools;35.0.0" "ndk;28.2.13676358"
 
       - name: cache
         uses: actions/cache@v4
