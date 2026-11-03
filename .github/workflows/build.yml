@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: write
     steps:
@@ -17,6 +17,7 @@ jobs:
         with:
           repository: ${{ secrets.PRIVATE_REPO }}
           token: ${{ secrets.PRIVATE_REPO_PAT }}
+          submodules: recursive
           fetch-depth: 1
 
       - name: setup java
@@ -33,7 +34,7 @@ jobs:
       - name: install ndk
         run: |
           yes | sdkmanager --licenses || true
-          sdkmanager --install "ndk;25.2.9519653"
+          sdkmanager --install "build-tools;35.0.0" "ndk;25.2.9519653"
 
       - name: cache
         uses: actions/cache@v4
@@ -57,7 +58,7 @@ jobs:
       - name: build
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleAres64Release \
+          ./gradlew :app:assembleRelease \
             -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" \
             -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
