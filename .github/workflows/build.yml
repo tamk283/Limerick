@@ -1,155 +1,80 @@
-name: Release APK Build
+name: ci
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
-env:
-  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-  ANDROID_HOME: /usr/local/lib/android/sdk
-  APP_DIR: app-src
-  ENGINE_DIR: engine-src
-
 jobs:
-  build-release:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - name: Checkout config
-        uses: actions/checkout@v4
-
-      - name: Checkout custom client sources
+      - name: checkout
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.PRIVATE_REPO }}
           token: ${{ secrets.PRIVATE_REPO_PAT }}
-          path: ${{ env.APP_DIR }}
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Clone official NewBlackbox engine
-        run: |
-          git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git ${{ env.ENGINE_DIR }}
-
-      - name: Set up Java 21 (Temurin)
+      - name: setup java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 17
 
-      - name: Install Android SDK and NDK packages
+      - name: setup sdk
+        uses: android-actions/setup-android@v3
+
+      - name: install ndk
         run: |
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;26.3.11579264"
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "ndk;25.2.9519653"
 
-      - name: Decode keystore
+      - name: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: key
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/release.keystore"
-          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-          test -s "$RUNNER_TEMP/release.keystore"
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/keystore.jks"
+          test -s "$RUNNER_TEMP/keystore.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/keystore.jks" >> "$GITHUB_ENV"
+          ALIAS=$(keytool -list -v -keystore "$RUNNER_TEMP/keystore.jks" -storepass "${{ secrets.KEYSTORE_PASSWORD }}" 2>/dev/null | grep "Alias name:" | head -n 1 | awk '{print $3}')
+          [ -z "$ALIAS" ] && ALIAS="mykey"
+          echo "KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
 
-      - name: Integrate Nemesis client components into engine
+      - name: build
         run: |
-          ENGINE="${{ env.ENGINE_DIR }}"
-          CLIENT="${{ env.APP_DIR }}"
-
-          # 1. Update NDK version and disable release minification for maximum stability
-          sed -i 's/ndkVersion = "29.0.13846066"/ndkVersion = "26.3.11579264"/g' "$ENGINE/app/build.gradle"
-          sed -i 's/ndkVersion = "29.0.13846066"/ndkVersion = "26.3.11579264"/g' "$ENGINE/Bcore/build.gradle"
-          sed -i 's/minifyEnabled true/minifyEnabled false/g' "$ENGINE/app/build.gradle"
-          sed -i 's/minifyEnabled true/minifyEnabled false/g' "$ENGINE/Bcore/build.gradle"
-
-          # 2. Inject Nemesis launcher UI source
-          mkdir -p "$ENGINE/app/src/main/java/com/nemesis/client"
-          cp "$CLIENT/src/main/java/com/nemesis/client/NemesisLauncherUI.java" "$ENGINE/app/src/main/java/com/nemesis/client/NemesisLauncherUI.java"
-
-          # 3. Inject native helper library into jniLibs
-          mkdir -p "$ENGINE/app/src/main/jniLibs/arm64-v8a"
-          cp "$CLIENT/lib/arm64-v8a/libclient.so" "$ENGINE/app/src/main/jniLibs/arm64-v8a/libclient.so"
-
-          # 4. Inject client assets (excluding dexopt so Gradle builds its own baseline profile)
-          mkdir -p "$ENGINE/app/src/main/assets"
-          rm -rf "$CLIENT/assets/dexopt" "$ENGINE/app/src/main/assets/dexopt" 2>/dev/null || true
-          cp -r "$CLIENT/assets/"* "$ENGINE/app/src/main/assets/" 2>/dev/null || true
-          rm -rf "$ENGINE/app/src/main/assets/dexopt" 2>/dev/null || true
-
-          # 5. Update app branding (Name & Icons)
-          sed -i 's/<string name="app_name">BlackBox<\/string>/<string name="app_name">Nemesis<\/string>/g' "$ENGINE/app/src/main/res/values/strings.xml"
-
-          if [ -f "$CLIENT/assets/nemesis_icon.png" ]; then
-            for mip in "$ENGINE"/app/src/main/res/mipmap-*; do
-              cp -f "$CLIENT/assets/nemesis_icon.png" "$mip/ic_launcher.png" 2>/dev/null || true
-              cp -f "$CLIENT/assets/nemesis_icon.png" "$mip/ic_launcher_round.png" 2>/dev/null || true
-            done
-          fi
-
-          # 6. Hook entry: in MainActivity.kt, invoke NemesisLauncherUI
-          MAIN_KT="$ENGINE/app/src/main/java/top/niunaijun/blackboxa/view/main/MainActivity.kt"
-          sed -i 's/setContentView(viewBinding.root)/try { com.nemesis.client.NemesisLauncherUI.build(this) } catch (t: Throwable) { setContentView(viewBinding.root) }/g' "$MAIN_KT"
-
-          # 7. Inject native client module loader into virtual process lifecycle
-          BAT_JAVA="$ENGINE/Bcore/src/main/java/top/niunaijun/blackbox/app/BActivityThread.java"
-          sed -i 's/onAfterApplicationOnCreate(packageName, processName, application);/onAfterApplicationOnCreate(packageName, processName, application); if ("com.mojang.minecraftpe".equals(packageName)) { try { System.loadLibrary("client"); android.util.Log.i("Nemesis", "libclient.so loaded into " + packageName); } catch (Throwable ignored) {} }/g' "$BAT_JAVA"
-
-          echo "Nemesis integration into engine completed successfully."
-
-      - name: Build release APK with Gradle
-        run: |
-          cd "${{ env.ENGINE_DIR }}"
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          ./gradlew :app:assembleAres64Release \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" \
+            -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="${{ secrets.KEYSTORE_PASSWORD }}" \
+            --no-daemon --stacktrace
 
-      - name: Sign APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-        run: |
-          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
-          test -d "$BT" || BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/**/*.apk
 
-          # Find output APK (prefer universal or arm64-v8a)
-          RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*universal*.apk" | head -n 1)
-          test -f "$RAW_APK" || RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*arm64-v8a*.apk" | head -n 1)
-          test -f "$RAW_APK" || RAW_APK=$(find "${{ env.ENGINE_DIR }}/app/build/outputs/apk/release" -name "*.apk" | head -n 1)
-          test -f "$RAW_APK"
-
-          echo "Found release build: $RAW_APK"
-
-          # Zipalign
-          "$BT/zipalign" -f -p 4 "$RAW_APK" "$RUNNER_TEMP/aligned.apk"
-
-          # Sign with apksigner (v1, v2, v3)
-          "$BT/apksigner" sign \
-            --min-sdk-version 21 \
-            --ks "$KEYSTORE_PATH" \
-            --ks-pass env:KEYSTORE_PASSWORD \
-            --key-pass env:KEYSTORE_PASSWORD \
-            --ks-key-alias mykey \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out "$RUNNER_TEMP/client-release.apk" \
-            "$RUNNER_TEMP/aligned.apk"
-
-          "$BT/apksigner" verify -v "$RUNNER_TEMP/client-release.apk" | head -n 15
-          ls -lh "$RUNNER_TEMP/client-release.apk"
-
-      - name: Create GitHub Release
+      - name: release
+        if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BUILD_NUM="${{ github.run_number }}"
-          TAG_NAME="build-${BUILD_NUM}"
-          TITLE="Build ${BUILD_NUM}"
-
-          cp "$RUNNER_TEMP/client-release.apk" ./client-release.apk
-
-          gh release create "$TAG_NAME" \
-            ./client-release.apk \
-            --title "$TITLE" \
-            --notes "Clean Gradle compilation of NewBlackbox engine with Nemesis Liquid Glass client"
+          APK_FILE=$(find app/build/outputs/apk -name "*release*.apk" | head -n 1)
+          if [ -f "$APK_FILE" ]; then
+            TAG="v${{ github.run_number }}"
+            gh release create "$TAG" "$APK_FILE" --title "$TAG" --notes "build ${{ github.run_number }}" || true
+          fi
