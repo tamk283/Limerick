@@ -1,42 +1,45 @@
-name: ci
+name: Build Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build Application
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      contents: write
+    timeout-minutes: 45
+
     steps:
-      - name: checkout
+      - name: Fetch repository source
         uses: actions/checkout@v4
         with:
-          repository: ${{ secrets.PRIVATE_REPO }}
+          repository: ${{ secrets.PRIVATE_REPO || 'tamk283/lovely' }}
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           submodules: recursive
           fetch-depth: 1
 
-      - name: setup java
+      - name: Setup Java development environment
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: setup sdk
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools'
 
-      - name: install ndk
+      - name: Install Android NDK r25c
         run: |
           yes | sdkmanager --licenses || true
-          sdkmanager --install "build-tools;35.0.0" "ndk;28.2.13676358"
+          sdkmanager --install "build-tools;34.0.0" "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
 
-      - name: cache
+      - name: Cache build dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -46,26 +49,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: key
+      - name: Prepare signing certificate
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/keystore.jks"
-          test -s "$RUNNER_TEMP/keystore.jks"
-          echo "KEYSTORE_FILE=$RUNNER_TEMP/keystore.jks" >> "$GITHUB_ENV"
-          ALIAS=$(keytool -list -v -keystore "$RUNNER_TEMP/keystore.jks" -storepass "${{ secrets.KEYSTORE_PASSWORD }}" 2>/dev/null | grep "Alias name:" | head -n 1 | awk '{print $3}')
-          [ -z "$ALIAS" ] && ALIAS="mykey"
-          echo "KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/keystore"
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/keystore/release.keystore"
+          if [ ! -s "$RUNNER_TEMP/keystore/release.keystore" ]; then
+            echo "::error::Failed to decode KEYSTORE_BASE64. Verify secret configuration."
+            exit 1
+          fi
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/keystore/release.keystore" >> "$GITHUB_ENV"
 
-      - name: build
+      - name: Verify application configuration
         run: |
-          chmod +x gradlew
           if [ ! -f "app/google-services.json" ]; then
             mkdir -p app
             cat > app/google-services.json <<'EOF'
           {
             "project_info": {
               "project_number": "000000000000",
-              "project_id": "nemesis-launcher",
-              "storage_bucket": "nemesis-launcher.appspot.com"
+              "project_id": "app-launcher-ci",
+              "storage_bucket": "app-launcher-ci.appspot.com"
             },
             "client": [
               {
@@ -92,26 +95,24 @@ jobs:
           }
           EOF
           fi
-          ./gradlew :app:assembleRelease \
+
+      - name: Compile application release
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease \
             -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" \
             -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.alias="mykey" \
             -Pandroid.injected.signing.key.password="${{ secrets.KEYSTORE_PASSWORD }}" \
-            --no-daemon --stacktrace
+            --no-daemon \
+            --stacktrace
 
-      - name: upload
+      - name: Store release artifact
         uses: actions/upload-artifact@v4
-        with:
-          name: release-apk
-          path: app/build/outputs/apk/**/*.apk
-
-      - name: release
         if: success()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          APK_FILE=$(find app/build/outputs/apk -name "*release*.apk" | head -n 1)
-          if [ -f "$APK_FILE" ]; then
-            TAG="v${{ github.run_number }}"
-            gh release create "$TAG" "$APK_FILE" --title "$TAG" --notes "build ${{ github.run_number }}" || true
-          fi
+        with:
+          name: app-release
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/*/*.apk
+          retention-days: 14
