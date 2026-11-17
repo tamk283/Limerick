@@ -16,7 +16,7 @@ jobs:
       - name: Fetch repository source
         uses: actions/checkout@v4
         with:
-          repository: ${{ secrets.PRIVATE_REPO || 'tamk283/lovely' }}
+          repository: tamk283/lovely
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           submodules: recursive
           fetch-depth: 1
